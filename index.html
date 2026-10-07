@@ -3594,7 +3594,7 @@ for (let value = startValue; value <= max; value += optimalInterval) {
             try {
                 const svgData = generateSVG();
                 convertSVGtoPSD(svgData);
-                showStatus('🎨 Photopea에서 PSD 자동 저장을 시작합니다', 'success');
+                showStatus('🎨 Photopea 연결 중... (잠시 기다려주세요)', 'success');
             } catch (error) {
                 console.error('PSD 변환 오류:', error);
                 showStatus('⚠ PSD 변환 실패', 'error');
@@ -4662,114 +4662,72 @@ for (let value = startValue; value <= max; value += optimalInterval) {
             return svg;
         }
         
-        // Photopea PSD 변환 (개선된 버전)
+        // Photopea PSD 변환
+        // 예전 방식(SVG+스크립트를 URL 해시에 넣어 새 창 열기)은 URL이 수백 KB로 길어져
+        // 프록시/보안 설정이 있는 환경(특히 Mac)에서 "사이트에 연결할 수 없음" 오류가 발생함.
+        // → 짧은 URL로 Photopea를 숨김 iframe에 띄우고 postMessage로 SVG를 전달,
+        //   saveToOE("psd")로 PSD를 돌려받아 브라우저에서 바로 다운로드한다.
         function convertSVGtoPSD(svgData) {
-            const svgBlob = new Blob([svgData], { type: 'image/svg+xml' });
-            const reader = new FileReader();
-            
-            reader.onload = function() {
-                const dataUri = reader.result;
-                const photopeaConfig = {
-                    files: [dataUri],
-                    environment: { 
-                        veryCompact: true,
-                        lang: "ko"
-                    },
-                    script: `
-                        try {
-                            // 기본 설정
-                            var width = 1920;
-                            var height = 1080;
-                            var resolution = 72;
-                            var mode = DocumentMode.RGB;
-                            var initialFill = DocumentFill.TRANSPARENT;
-                            
-                            // 새 문서 생성
-                            var doc = app.documents.add(width, height, resolution, "차트_" + new Date().getTime(), mode, initialFill);
-                            doc.colorProfileName = "sRGB IEC61966-2.1";
-                            
-                            // 가져온 SVG 문서 확인
-                            var importedDoc = null;
-                            if (app.documents.length > 1) {
-                                importedDoc = app.documents[app.documents.length - 1];
-                                if (importedDoc !== doc) {
-                                    app.activeDocument = importedDoc;
-                                    
-                                    // 전체 레이어를 하나로 합치기
-                                    if (importedDoc.layers.length > 1) {
-                                        importedDoc.flatten();
-                                    }
-                                    
-                                    // 메인 문서로 복사
-                                    app.activeDocument = importedDoc;
-                                    importedDoc.selection.selectAll();
-                                    importedDoc.selection.copy();
-                                    
-                                    // 메인 문서에 붙여넣기
-                                    app.activeDocument = doc;
-                                    doc.paste();
-                                    
-                                    // 가져온 문서 닫기
-                                    importedDoc.close(SaveOptions.DONOTSAVECHANGES);
-                                }
-                            }
-                            
-                            // 메인 문서 활성화
-                            app.activeDocument = doc;
-                            
-                            // 레이어 그룹 생성
-                            var chartGroup = doc.layerSets.add();
-                            chartGroup.name = "차트";
-                            
-                            var backgroundGroup = doc.layerSets.add();
-                            backgroundGroup.name = "배경";
-                            
-                            // 기존 레이어들을 적절한 그룹으로 이동
-                            var layers = [];
-                            for (var i = 0; i < doc.layers.length; i++) {
-                                if (doc.layers[i] !== chartGroup && doc.layers[i] !== backgroundGroup) {
-                                    layers.push(doc.layers[i]);
-                                }
-                            }
-                            
-                            // 레이어들을 차트 그룹으로 이동
-                            for (var i = 0; i < layers.length; i++) {
-                                layers[i].move(chartGroup, ElementPlacement.INSIDE);
-                            }
-                            
-                            // PSD로 저장
-                            var saveFile = new File("~/Desktop/chart_" + new Date().getTime() + ".psd");
-                            var psdOptions = new PhotoshopSaveOptions();
-                            psdOptions.layers = true;
-                            psdOptions.embedColorProfile = true;
-                            
-                            doc.saveAs(saveFile, psdOptions);
-                            
-                            alert("차트가 성공적으로 PSD 파일로 저장되었습니다!\\n\\n" +
-                                  "저장 위치: 바탕화면\\n" +
-                                  "문서 크기: " + width + "×" + height + "px\\n" +
-                                  "해상도: " + resolution + " PPI\\n" +
-                                  "색상 모드: RGB 8bit\\n\\n" +
-                                  "레이어 구조:\\n" +
-                                  "• 차트 그룹\\n" +
-                                  "• 배경 그룹");
-                                  
-                        } catch (error) {
-                            alert("오류가 발생했습니다: " + error.toString() + "\\n\\n" +
-                                  "SVG 파일을 수동으로 가져온 후 PSD로 저장해주세요.\\n" +
-                                  "File → Place Embedded 또는 File → Import를 사용하세요.");
-                        }
-                    `
-                };
-                
-                const configString = JSON.stringify(photopeaConfig);
-                const encodedConfig = encodeURIComponent(configString);
-                const photopeaUrl = `https://www.photopea.com/#${encodedConfig}`;
-                
-                window.open(photopeaUrl, 'photopea', 'width=1400,height=900,scrollbars=yes,resizable=yes');
+            const PP_ORIGIN = 'https://www.photopea.com';
+            const fileName = 'chart_' + new Date().getTime() + '.psd';
+
+            const old = document.getElementById('photopeaBridge');
+            if (old) old.remove();
+
+            const iframe = document.createElement('iframe');
+            iframe.id = 'photopeaBridge';
+            iframe.style.cssText = 'position:fixed;left:-10000px;top:0;width:1200px;height:800px;border:0;';
+
+            let step = 0; // 0: 로딩 대기, 1: SVG 열기 대기, 2: PSD 저장 대기
+            let psdBuffer = null;
+
+            const cleanup = () => {
+                clearTimeout(timer);
+                window.removeEventListener('message', onMessage);
+                iframe.remove();
             };
-            
-            reader.readAsDataURL(svgBlob);
+
+            const timer = setTimeout(() => {
+                cleanup();
+                showStatus('⚠ Photopea 연결 시간 초과 - 네트워크/프록시에서 photopea.com 접속이 차단되었는지 확인해주세요', 'error');
+            }, 60000);
+
+            const onMessage = (e) => {
+                if (e.origin !== PP_ORIGIN || e.source !== iframe.contentWindow) return;
+
+                if (e.data instanceof ArrayBuffer) {
+                    psdBuffer = e.data;
+                    return;
+                }
+                if (e.data !== 'done') return;
+
+                if (step === 0) {
+                    step = 1;
+                    showStatus('🎨 Photopea에서 차트를 여는 중...', 'success');
+                    const buf = new TextEncoder().encode(svgData).buffer;
+                    iframe.contentWindow.postMessage(buf, PP_ORIGIN, [buf]);
+                } else if (step === 1) {
+                    step = 2;
+                    showStatus('🎨 PSD 파일 생성 중...', 'success');
+                    iframe.contentWindow.postMessage('app.activeDocument.saveToOE("psd");', PP_ORIGIN);
+                } else if (step === 2 && psdBuffer) {
+                    const blob = new Blob([psdBuffer], { type: 'image/vnd.adobe.photoshop' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = fileName;
+                    document.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                    setTimeout(() => URL.revokeObjectURL(url), 1000);
+                    cleanup();
+                    showStatus('✅ PSD 파일이 다운로드되었습니다: ' + fileName, 'success');
+                }
+            };
+
+            window.addEventListener('message', onMessage);
+            iframe.src = PP_ORIGIN + '#' + encodeURIComponent(JSON.stringify({ environment: { lang: 'ko' } }));
+            document.body.appendChild(iframe);
         }
     
 // ====================== Favorites Feature ======================
